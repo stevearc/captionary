@@ -10,8 +10,8 @@ import zipfile
 
 
 # TODO
-# * Set up the role with permissions on the DynamoDB table and CloudWatch rules and lambda
-# * Set up the API gateway for Lambda
+# * Set up the role with permissions on the DynamoDB table, CloudWatch rules, lambda, cloudwatch logs for API gateway (& trust relationship)
+# * Set up the API gateway for Lambda, set role ARN for logging
 # * Set retention policy on cloudwatch log stream
 # * Cleanup command
 

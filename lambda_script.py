@@ -10,8 +10,11 @@ import dynamo3
 from urllib.parse import parse_qsl
 
 # TODO:
-# * debug info (ongoing contests, end times, current submission count, etc.)
+# * fix dupe messages
+# * lock submissions to certain users
+# * display error if trying to caption when no contest going on
 # * configure the contest duration
+# * debug info (ongoing contests, end times, current submission count, etc.)
 
 TABLE_NAME = "CaptionarySubmissions"
 OAUTH_TOKEN = os.environ["OAUTH_TOKEN"]
@@ -72,6 +75,27 @@ class Connections(object):
             self._lam = boto3.client("lambda")
         return self._lam
 
+    def start_contest(self, channel, file_id):
+        item = {"channel": "CONSTANTS", "text": channel, "file_id": file_id}
+        try:
+            self.dynamo.put_item2(
+                TABLE_NAME, item, condition="attribute_not_exists(channel)"
+            )
+        except dynamo3.ConditionalCheckFailedException:
+            return False
+        return True
+
+    def is_contest_ongoing(self, channel):
+        count = self.dynamo.query2(
+            TABLE_NAME,
+            "channel = :const and #text = :channel",
+            alias={"#text": "text"},
+            select="COUNT",
+            const="CONSTANTS",
+            channel=channel,
+        )
+        return bool(count)
+
     def add_submission(self, channel, text):
         item = {"channel": channel, "text": text}
         self.dynamo.put_item2(TABLE_NAME, item)
@@ -81,6 +105,7 @@ class Connections(object):
         with self.dynamo.batch_write(TABLE_NAME) as writer:
             for item in items:
                 writer.delete(item)
+        self.dynamo.delete_item2(TABLE_NAME, {"channel": "CONSTANTS", "text": channel})
         return items
 
     def get_submissions(self, channel):
@@ -245,12 +270,9 @@ def handle_command(event):
     if event["command"] == "/caption":
         text = event["text"]
         channel = event["channel_id"]
-        if text == "we done":
-            finish_contest(channel)
-            return {"statusCode": 200}
-        elif text == "debug":
-            captions = db.get_submissions(channel)
-            return {"statusCode": 200, "body": "%d captions" % len(captions)}
+        response = debug_command(channel, text)
+        if response is not None:
+            return {"statusCode": 200, "body": response}
         print("Adding a submission to channel %s: %s" % (channel, text))
         db.add_submission(channel, text)
         return {
@@ -260,10 +282,24 @@ def handle_command(event):
     return {"statusCode": 404}
 
 
+def debug_command(channel, text):
+    if text == "we done":
+        finish_contest(channel)
+        return ""
+    elif text == "debug":
+        is_ongoing = db.is_contest_ongoing(channel)
+        message = "Contest ongoing" if is_ongoing else "No contest right now"
+        if is_ongoing:
+            captions = db.get_submissions(channel)
+            message += "\n%d captions submitted" % len(captions)
+        return message
+
+
 def handle_im(event):
     text = event["text"]
     if event.get("subtype") == "bot_message":
         return
+    print("IM: " + text)
     slack.post(event["channel"], HELP)
 
 
@@ -276,8 +312,13 @@ def check_for_image(event, context):
     if image is None:
         return
     channel = event["channel"]
+    print(event)
+    if not db.start_contest(channel, image["id"]):
+        print("Detected file in message, but contest is already ongoing")
+        return
     print(
-        "Detected file in message. Starting new caption contest in channel " + channel
+        "Detected file in message. Starting new caption contest in channel %s file %s uploaded at %s"
+        % (channel, image["id"], datetime.fromtimestamp(image["timestamp"]).isoformat())
     )
     db.get_and_clear_submissions(channel)
     db.set_callback(channel)

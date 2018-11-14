@@ -1,82 +1,128 @@
-# -*- coding: utf-8 -*-
 from __future__ import print_function, unicode_literals
 from datetime import datetime, timedelta
 import random
 import logging
-from .db import Config, Caption
+from .db import Config, Caption, State
 from .util import format_timedelta
+from .slack import SlackException
 
 LOG = logging.getLogger(__name__)
 
-DURATION = timedelta(hours=8)
-
-EMOJIS = [
-    ("one", "1"),
-    ("two", "2"),
-    ("three", "3"),
-    ("four", "4"),
-    ("five", "5"),
-    ("six", "6"),
-    ("seven", "7"),
-    ("eight", "8"),
-    ("nine", "9"),
-    ("keycap_ten", "10"),
-    ("heart_eyes", "😍"),
-    ("stuck_out_tongue", "😛"),
-    ("money_mouth_face", "🤑"),
-    ("zany_face", "🤪"),
-    ("no_mouth", "😶"),
-    ("fox_face", "🦊"),
-    ("unicorn_face", "🦄"),
-    ("monkey_face", "🐵"),
-    ("heart", "❤"),
-    ("clown_face", "🤡"),
-]
+CAPTION_DURATION = timedelta(hours=8)
+VOTE_DURATION = timedelta(hours=24)
 
 
 def start_contest(request, channel, image):
-    end_dt = datetime.utcnow() + DURATION
-    if not Config.start_contest(
-        request.db, channel, image["id"], image["url_private"], end_dt
-    ):
-        LOG.info("Blocking duplicate contest start %s %s", channel, image["id"])
+    end_dt = datetime.utcnow() + CAPTION_DURATION
+    config = Config.get_or_create(request.db, channel)
+
+    file_id = image["id"]
+    image_url = image["url_private"]
+    if config.value.get("file_id") == file_id:
+        LOG.info("Blocking duplicate contest start %s %s", channel, file_id)
         return
+
     LOG.info(
-        "Detected file in message. Starting new caption contest in channel %s file %s uploaded at %s",
+        "Detected image in message. Starting new caption contest in channel %s file %s uploaded at %s",
         channel,
-        image["id"],
+        file_id,
         datetime.fromtimestamp(image["timestamp"]).isoformat(),
     )
+
+    state = config.value.get("state")
+    if state == State.voting:
+        LOG.info("Ending previous vote before starting new contest")
+        _end_voting(request, config)
+
+    Config.start_contest(request.db, config, file_id, image_url, end_dt)
+    Caption.clear_captions(request.db, channel)
 
     request.slack.post(
         channel,
         "<!channel> New caption contest! Submit your captions using the `/caption` command. Polls will open in %s"
-        % format_timedelta(DURATION),
+        % format_timedelta(CAPTION_DURATION),
         mrkdwn=True,
     )
 
 
-def finish_contest(request, channel):
-    captions = Caption.get_captions(request.db, channel)
-    Caption.clear_captions(request.db, channel)
-    data = Config.end_contest(request.db, channel)
-    if not data:
-        LOG.info("Trying to end contest in %s, but none ongoing", channel)
+def proceed_contest(request, channel):
+    config = Config.get_config(request.db, channel)
+    if config is None:
+        LOG.warning("Cannot move contest forward on %s: empty config", channel)
         return
+    state = config.value.get("state")
+    if state == State.none:
+        LOG.warning("Cannot move contest forward on %s: config state None", channel)
+    elif state == State.captioning:
+        _start_voting(request, config)
+    elif state == State.voting:
+        _end_voting(request, config)
+    else:
+        LOG.error("Config %s in bad state: %r. Clearing state...", channel, state)
+        request.db.delete(config)
+
+
+def _start_voting(request, config):
+    captions = Caption.get_captions(request.db, config.channel)
     if not captions:
-        LOG.info("Ending contest %s with no caption submissions", channel)
+        LOG.info("Ending contest %s with no caption submissions", config.channel)
+        Config.end_contest(request.db, config)
         return
     random.shuffle(captions)
-    text = "\n".join(
-        ["%s. %s" % (e[1], caption) for (e, caption) in zip(EMOJIS, captions)]
-    )
-    LOG.info("Ending contest %s:\n%s", channel, text)
+
+    file_id = config.value["file_id"]
+    image_url = config.value["image_url"]
+    attachments = [{"text": file_id, "image_url": image_url}]
+    for i, caption in enumerate(captions):
+        attachments.append(
+            {
+                "text": caption.caption,
+                "callback_id": file_id,
+                "actions": [
+                    {
+                        "name": "vote",
+                        "text": "Vote",
+                        "type": "button",
+                        "value": str(caption.id),
+                        "mrkdwn_in": ["text"],
+                    }
+                ],
+            }
+        )
+
     resp = request.slack.post(
-        channel,
-        text,
-        mrkdwn=True,
-        attachments=[{"text": data["file_id"], "image_url": data["image_url"]}],
+        config.channel, "Get out the vote!", attachments=attachments
     )
     ts = resp["message"]["ts"]
-    for i in range(len(captions)):
-        request.slack.add_reaction(channel, ts, EMOJIS[i][0])
+    end_dt = datetime.utcnow() + VOTE_DURATION
+    Config.start_voting(request.db, config, ts, end_dt)
+
+
+def _end_voting(request, config):
+    captions = Caption.get_captions_and_votes(request.db, config.channel)
+    captions.sort(reverse=True)
+
+    file_id = config.value["file_id"]
+    image_url = config.value["image_url"]
+    message = "*Caption results:*"
+    for votes, caption in captions:
+        if votes > 0:
+            message += "\n%d - %s" % (votes, caption)
+        else:
+            message += "\n%s" % caption
+    request.slack.post(
+        config.channel,
+        message,
+        attachments=[{"text": file_id, "image_url": image_url}],
+        mrkdwn=True,
+    )
+
+    message_ts = config.value["message_ts"]
+
+    Caption.clear_captions(request.db, config.channel)
+    Config.end_contest(request.db, config)
+
+    try:
+        request.slack.delete(config.channel, message_ts)
+    except SlackException:
+        pass

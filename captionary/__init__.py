@@ -22,6 +22,7 @@ LOG = logging.getLogger(__name__)
 def add_routes(config):
     config.add_route("event", "/event")
     config.add_route("command", "/command")
+    config.add_route("vote", "/vote")
 
 
 def includeme(config):

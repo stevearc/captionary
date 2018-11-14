@@ -1,15 +1,34 @@
 import json
-from datetime import datetime
 import time
-import calendar
 import zope.sqlalchemy
-from sqlalchemy import engine_from_config, Column, String, UnicodeText, Integer, and_
+from pyramid.renderers import render
+from sqlalchemy import (
+    engine_from_config,
+    Column,
+    String,
+    UnicodeText,
+    Integer,
+    ForeignKey,
+    func,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.mutable import Mutable
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, relationship, backref
+from sqlalchemy.interfaces import PoolListener
 from sqlalchemy.types import TypeDecorator, TEXT
 
 Base = declarative_base()  # pylint: disable=C0103
+
+
+class ForeignKeysListener(PoolListener):
+    def connect(self, dbapi_con, con_record):
+        db_cursor = dbapi_con.execute("pragma foreign_keys=ON")
+
+
+class State(object):
+    none = None
+    captioning = "captioning"
+    voting = "voting"
 
 
 class JSONEncodedDict(TypeDecorator):  # pylint: disable=W0223
@@ -20,7 +39,7 @@ class JSONEncodedDict(TypeDecorator):  # pylint: disable=W0223
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            value = json.dumps(value)
+            value = render("json", value)
         return value
 
     def process_result_value(self, value, dialect):
@@ -48,14 +67,17 @@ class MutableDict(Mutable, dict):
 
     def __setitem__(self, key, value):
         "Detect dictionary set events and emit change events."
-
         dict.__setitem__(self, key, value)
         self.changed()
 
     def __delitem__(self, key):
         "Detect dictionary del events and emit change events."
-
         dict.__delitem__(self, key)
+        self.changed()
+
+    def pop(self, key, default=None):
+        "Detect dictionary pop events and emit change events."
+        dict.pop(self, key, default)
         self.changed()
 
 
@@ -69,29 +91,19 @@ class Config(Base):
     value = Column(JSONEncodedDict(), nullable=False)
 
     @classmethod
-    def _get_contest(cls, db, channel):
-        return db.query(cls).filter(and_(cls.key == "contest", cls.channel == channel))
+    def start_contest(cls, db, config, file_id, image_url, end_dt):
+        config.value["file_id"] = file_id
+        config.value["image_url"] = image_url
+        config.value["end"] = end_dt
+        config.value["state"] = State.captioning
+        db.merge(config)
 
     @classmethod
-    def start_contest(cls, db, channel, file_id, image_url, end_dt):
-        prev = (
-            db.query(cls)
-            .filter(and_(cls.key == "contest", cls.channel == channel))
-            .first()
-        )
-        if prev is not None and prev.value.get("file_id") == file_id:
-            return False
-        config = cls(
-            key="contest",
-            channel=channel,
-            value={
-                "file_id": file_id,
-                "image_url": image_url,
-                "end": calendar.timegm(end_dt.utctimetuple()),
-            },
-        )
+    def start_voting(cls, db, config, message_ts, end_dt):
+        config.value["message_ts"] = message_ts
+        config.value["end"] = end_dt
+        config.value["state"] = State.voting
         db.merge(config)
-        return True
 
     @classmethod
     def get_ended_configs(cls, db):
@@ -100,23 +112,31 @@ class Config(Base):
         return [c for c in configs if "end" in c.value and c["end"] < now]
 
     @classmethod
-    def get_contest_end(cls, db, channel):
-        config = cls._get_contest(db, channel).first()
-        if config is None or "end" not in config.value:
-            return None
-        return datetime.utcfromtimestamp(config.value["end"])
+    def get_config(cls, db, channel):
+        return db.query(cls).get(("contest", channel))
 
     @classmethod
-    def end_contest(cls, db, channel):
-        config = cls._get_contest(db, channel).one()
-        if "end" in config.value:
-            data = dict(config.value)
-            del config.value["file_id"]
-            del config.value["image_url"]
-            del config.value["end"]
+    def get_or_create(cls, db, channel):
+        config = db.query(cls).get(("contest", channel))
+        if config is None:
+            config = cls(key="contest", channel=channel, value={})
             db.merge(config)
-            return data
-        return None
+        return config
+
+    @classmethod
+    def get_contest_state(cls, db, channel):
+        config = db.query(cls).get(("contest", channel))
+        if config is not None:
+            return config.value.get("state")
+
+    @classmethod
+    def end_contest(cls, db, config):
+        config.value.pop("file_id")
+        config.value.pop("image_url")
+        config.value.pop("message_ts")
+        config.value.pop("state")
+        config.value.pop("end")
+        db.merge(config)
 
 
 class Caption(Base):
@@ -131,11 +151,50 @@ class Caption(Base):
 
     @classmethod
     def get_captions(cls, db, channel):
-        return [cap.caption for cap in db.query(cls).filter(cls.channel == channel)]
+        return list(db.query(cls).filter(cls.channel == channel))
+
+    @classmethod
+    def get_captions_and_votes(cls, db, channel):
+        return list(
+            db.query(func.count(Vote.user), cls.caption)
+            .select_from(cls)
+            .outerjoin(Vote)
+            .filter(cls.channel == channel)
+            .group_by(cls.id)
+        )
 
     @classmethod
     def clear_captions(cls, db, channel):
         db.query(cls).filter(cls.channel == channel).delete(synchronize_session=False)
+
+    @classmethod
+    def get_votes(cls, db, user, channel):
+        return (
+            db.query(cls)
+            .join(Vote.caption)
+            .filter(cls.channel == channel)
+            .filter(Vote.user == user)
+        )
+
+
+class Vote(Base):
+    __tablename__ = "votes"
+    user = Column(String(20), primary_key=True)
+    caption_id = Column(
+        Integer, ForeignKey(Caption.id, ondelete="CASCADE"), primary_key=True
+    )
+
+    caption = relationship(
+        "Caption", backref=backref("votes", cascade="all, delete-orphan")
+    )
+
+    @classmethod
+    def toggle_vote(cls, db, user, caption):
+        vote = db.query(cls).get((user, caption))
+        if vote is None:
+            db.add(cls(user=user, caption_id=caption))
+        else:
+            db.delete(vote)
 
 
 def get_db(request):
@@ -147,7 +206,9 @@ def get_db(request):
 def includeme(config):
     settings = config.get_settings()
 
-    engine = engine_from_config(settings, prefix="db.")
+    engine = engine_from_config(
+        settings, prefix="db.", listeners=[ForeignKeysListener()]
+    )
     # Create SQL schema if not exists
     Base.metadata.create_all(bind=engine)
     config.registry.dbmaker = sessionmaker(bind=engine)

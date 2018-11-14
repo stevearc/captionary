@@ -2,13 +2,14 @@
 from __future__ import print_function, unicode_literals
 import logging
 import traceback
+import json
 from datetime import datetime
 from pyramid_duh import argify
 from pyramid.httpexceptions import HTTPException, HTTPNotFound
 from pyramid.settings import asbool
 from pyramid.view import view_config
-from .actions import start_contest, finish_contest
-from .db import Config, Caption
+from .actions import start_contest, proceed_contest
+from .db import Config, Caption, Vote, State
 from .util import format_timedelta
 
 
@@ -41,7 +42,6 @@ def handle_im(request, event):
     text = event["text"]
     if event.get("subtype") == "bot_message":
         return
-    LOG.info("IM: %s", text)
     request.slack.post(event["channel"], HELP)
 
 
@@ -66,11 +66,11 @@ def handle_command(request, command, text, channel_id):
         if response is not None:
             request.response.text = response
             return request.response
-        end_dt = Config.get_contest_end(request.db, channel)
-        if not end_dt:
-            request.response.text = "There's no caption contest going on right now"
+        state = Config.get_contest_state(request.db, channel)
+        if state != State.captioning:
+            request.response.text = "Not accepting captions right now, thx"
             return request.response
-        print("Adding a submission to channel %s: %s" % (channel, text))
+        LOG.info("Adding a submission to channel %s: %s", channel, text)
         Caption.add_submission(request.db, channel, text)
         return {"text": "_" + text + "_", "mrkdwn": True}
     return HTTPNotFound("Unrecognized command %s" % command)
@@ -78,20 +78,44 @@ def handle_command(request, command, text, channel_id):
 
 def debug_command(request, channel, text):
     if text == "we done":
-        finish_contest(request, channel)
+        proceed_contest(request, channel)
         return ""
-    elif text == "debug":
+    elif text in ("debug", "status"):
+        config = Config.get_config(request.db, channel)
+        if config is None:
+            return "Not much going on atm"
+        state = config.value.get("state")
         now = datetime.utcnow()
-        end_dt = Config.get_contest_end(request.db, channel)
-        message = (
-            "Contest ends in " + format_timedelta(end_dt - now)
-            if end_dt
-            else "No contest right now"
-        )
-        if end_dt is not None:
+        message = "State: %s" % state
+        if "end" in config.value:
+            end_dt = datetime.utcfromtimestamp(config.value.get("end"))
+        if state == State.captioning:
+            message += "\nVoting starts in " + format_timedelta(end_dt - now)
             captions = Caption.get_captions(request.db, channel)
             message += "\n%d captions submitted" % len(captions)
+        elif state == State.voting:
+            message += "\nVoting closes in " + format_timedelta(end_dt - now)
+            captions = Caption.get_captions_and_votes(request.db, channel)
+            captions.sort(reverse=True)
+            for count, caption in captions:
+                message += "\n%s - %s" % (count, caption)
+
         return message
+
+
+@view_config(route_name="vote", renderer="json")
+@argify
+def handle_vote(request, payload):
+    payload = json.loads(payload)
+    file_id = payload["callback_id"]
+    channel = payload["channel"]["id"]
+    user = payload["user"]["id"]
+    vote = payload["actions"][0]["value"]
+    Vote.toggle_vote(request.db, user, int(vote))
+    votes = Caption.get_votes(request.db, user, channel)
+    text = "*Your votes:*\n" + "\n".join([vote.caption for vote in votes])
+    request.slack.post_ephemeral(channel, user, text, mrkdwn=True)
+    return request.response
 
 
 @view_config(context=Exception, renderer="json")

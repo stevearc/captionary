@@ -1,7 +1,7 @@
 import logging
 import argparse
 from pyramid.paster import bootstrap
-from .actions import finish_contest
+from .actions import proceed_contest
 from .db import Config
 
 
@@ -17,4 +17,4 @@ def process_queue():
     request = env["request"]
     configs = Config.get_ended_configs(request.db)
     for config in configs:
-        finish_contest(request, config.channel)
+        proceed_contest(request, config.channel)

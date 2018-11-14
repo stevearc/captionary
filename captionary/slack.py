@@ -5,6 +5,10 @@ import logging
 LOG = logging.getLogger(__name__)
 
 
+class SlackException(Exception):
+    pass
+
+
 class SlackAPI(object):
     def __init__(self, request):
         self.request = request
@@ -13,6 +17,15 @@ class SlackAPI(object):
         body = {"channel": channel, "text": text}
         body.update(kwargs)
         return self.call("/chat.postMessage", body)
+
+    def post_ephemeral(self, channel, user, text, **kwargs):
+        body = {"channel": channel, "user": user, "text": text}
+        body.update(kwargs)
+        return self.call("/chat.postEphemeral", body)
+
+    def delete(self, channel, ts):
+        body = {"channel": channel, "ts": ts}
+        return self.call("/chat.delete", body)
 
     def add_reaction(self, channel, timestamp, emoji, **kwargs):
         body = {"channel": channel, "timestamp": timestamp, "name": emoji}
@@ -30,7 +43,7 @@ class SlackAPI(object):
             LOG.error(
                 "Slack API error. path: %s body: %s response: %s", path, body, data
             )
-            raise Exception("Slack API exception: " + data["error"])
+            raise SlackException("Slack API exception: " + data["error"])
         return data
 
 

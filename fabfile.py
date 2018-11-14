@@ -11,7 +11,11 @@ def _get_var(key):
     return os.environ[key]
 
 
-CONSTANTS = {"venv": "/envs/captionary", "OAUTH_TOKEN": _get_var("OAUTH_TOKEN")}
+CONSTANTS = {
+    "venv": "/envs/captionary",
+    "OAUTH_TOKEN": _get_var("OAUTH_TOKEN"),
+    "conf": "/etc/emperor/captionary.ini",
+}
 
 
 def _render(filename, **context):
@@ -60,4 +64,9 @@ def do_deploy(local, remote):
     remote.sudo(pip + " install pastescript")
     remote.sudo(pip + " install %s" % tarball)
     _render_put(remote, "prod.ini.tmpl", "captionary.ini")
-    remote.sudo("mv captionary.ini /etc/emperor/captionary.ini")
+    remote.sudo("rm -f captionary")
+    _render_put(remote, "cron.tmpl", "captionary")
+    remote.sudo("chmod 644 captionary")
+    remote.sudo("chown root:root captionary")
+    remote.sudo("mv captionary /etc/cron.d")
+    remote.sudo("mv captionary.ini %s" % CONSTANTS["conf"])

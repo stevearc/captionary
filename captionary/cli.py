@@ -1,5 +1,6 @@
 import logging
 import argparse
+import transaction
 from pyramid.paster import bootstrap
 from .actions import proceed_contest
 from .db import Config
@@ -18,3 +19,4 @@ def process_queue():
     configs = Config.get_ended_configs(request.db)
     for config in configs:
         proceed_contest(request, config.channel)
+    transaction.commit()

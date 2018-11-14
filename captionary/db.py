@@ -86,7 +86,6 @@ MutableDict.associate_with(JSONEncodedDict)
 
 class Config(Base):
     __tablename__ = "configs"
-    key = Column(String(20), primary_key=True)
     channel = Column(String(20), primary_key=True)
     value = Column(JSONEncodedDict(), nullable=False)
 
@@ -107,25 +106,25 @@ class Config(Base):
 
     @classmethod
     def get_ended_configs(cls, db):
-        configs = db.query(cls).filter(cls.key == "contest")
+        configs = db.query(cls)
         now = time.time()
-        return [c for c in configs if "end" in c.value and c["end"] < now]
+        return [c for c in configs if "end" in c.value and c.value["end"] < now]
 
     @classmethod
     def get_config(cls, db, channel):
-        return db.query(cls).get(("contest", channel))
+        return db.query(cls).get(channel)
 
     @classmethod
     def get_or_create(cls, db, channel):
-        config = db.query(cls).get(("contest", channel))
+        config = db.query(cls).get(channel)
         if config is None:
-            config = cls(key="contest", channel=channel, value={})
+            config = cls(channel=channel, value={})
             db.merge(config)
         return config
 
     @classmethod
     def get_contest_state(cls, db, channel):
-        config = db.query(cls).get(("contest", channel))
+        config = db.query(cls).get(channel)
         if config is not None:
             return config.value.get("state")
 

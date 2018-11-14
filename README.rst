@@ -10,7 +10,5 @@ Set up a slack bot:
 
 TODO
 ----
-
-* Process queue in cron
 * Lock down submission to a single person
 * Configure the duration

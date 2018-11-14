@@ -73,7 +73,7 @@ class Config(Base):
         return db.query(cls).filter(and_(cls.key == "contest", cls.channel == channel))
 
     @classmethod
-    def start_contest(cls, db, channel, file_id, end_dt):
+    def start_contest(cls, db, channel, file_id, image_url, end_dt):
         prev = (
             db.query(cls)
             .filter(and_(cls.key == "contest", cls.channel == channel))
@@ -84,7 +84,11 @@ class Config(Base):
         config = cls(
             key="contest",
             channel=channel,
-            value={"file_id": file_id, "end": calendar.timegm(end_dt.utctimetuple())},
+            value={
+                "file_id": file_id,
+                "image_url": image_url,
+                "end": calendar.timegm(end_dt.utctimetuple()),
+            },
         )
         db.merge(config)
         return True
@@ -106,11 +110,13 @@ class Config(Base):
     def end_contest(cls, db, channel):
         config = cls._get_contest(db, channel).one()
         if "end" in config.value:
+            data = dict(config.value)
             del config.value["file_id"]
+            del config.value["image_url"]
             del config.value["end"]
             db.merge(config)
-            return True
-        return False
+            return data
+        return None
 
 
 class Caption(Base):
@@ -125,7 +131,7 @@ class Caption(Base):
 
     @classmethod
     def get_captions(cls, db, channel):
-        return [cap.caption for cap in db.query(cls)]
+        return [cap.caption for cap in db.query(cls).filter(cls.channel == channel)]
 
     @classmethod
     def clear_captions(cls, db, channel):

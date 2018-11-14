@@ -36,7 +36,9 @@ EMOJIS = [
 
 def start_contest(request, channel, image):
     end_dt = datetime.utcnow() + DURATION
-    if not Config.start_contest(request.db, channel, image["id"], end_dt):
+    if not Config.start_contest(
+        request.db, channel, image["id"], image["url_private"], end_dt
+    ):
         LOG.info("Blocking duplicate contest start %s %s", channel, image["id"])
         return
     LOG.info(
@@ -57,7 +59,8 @@ def start_contest(request, channel, image):
 def finish_contest(request, channel):
     captions = Caption.get_captions(request.db, channel)
     Caption.clear_captions(request.db, channel)
-    if not Config.end_contest(request.db, channel):
+    data = Config.end_contest(request.db, channel)
+    if not data:
         LOG.info("Trying to end contest in %s, but none ongoing", channel)
         return
     if not captions:
@@ -68,7 +71,12 @@ def finish_contest(request, channel):
         ["%s. %s" % (e[1], caption) for (e, caption) in zip(EMOJIS, captions)]
     )
     LOG.info("Ending contest %s:\n%s", channel, text)
-    resp = request.slack.post(channel, text, mrkdwn=True)
+    resp = request.slack.post(
+        channel,
+        text,
+        mrkdwn=True,
+        attachments=[{"text": data["file_id"], "image_url": data["image_url"]}],
+    )
     ts = resp["message"]["ts"]
     for i in range(len(captions)):
         request.slack.add_reaction(channel, ts, EMOJIS[i][0])

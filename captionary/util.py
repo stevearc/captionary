@@ -4,9 +4,8 @@ from math import floor
 
 def format_timedelta(dt):
     msg = ""
+    days = dt.days
     remainder = dt.seconds
-    days = floor(remainder / 3600 / 24)
-    remainder -= days * 3600 * 24
     hours = floor(remainder / 3600)
     remainder -= hours * 3600
     minutes = floor(remainder / 60)

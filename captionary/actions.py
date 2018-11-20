@@ -39,8 +39,8 @@ def start_contest(request, channel, image):
 
     request.slack.post(
         channel,
-        "<!channel> New caption contest! Submit your captions using the `/caption` command. Polls will open in %s"
-        % format_timedelta(CAPTION_DURATION),
+        "<!channel> New caption contest! Submissions close in %s, and then voting begins! Polls will be open for %s (or until next contest start)"
+        % (format_timedelta(CAPTION_DURATION), format_timedelta(VOTE_DURATION)),
         mrkdwn=True,
     )
 
@@ -91,7 +91,10 @@ def _start_voting(request, config):
         )
 
     resp = request.slack.post(
-        config.channel, "Get out the vote!", attachments=attachments
+        config.channel,
+        "Get out the vote! Polls are open for %s (or until next contest start)"
+        % format_timedelta(VOTE_DURATION),
+        attachments=attachments,
     )
     ts = resp["message"]["ts"]
     end_dt = datetime.utcnow() + VOTE_DURATION

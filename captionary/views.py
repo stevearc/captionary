@@ -15,7 +15,7 @@ from .util import format_timedelta
 
 LOG = logging.getLogger(__name__)
 HELP = """Hello! I am a caption contest bot.
-1. You can start a new caption contest by uploading a photo in a channel that I'm in
+1. You can start a new caption contest by uploading a photo and mentioning me in the message
 2. People can submit captions with `/caption`
 3. I'll post everyone's submissions and you can vote on the best ones!"""
 
@@ -31,11 +31,15 @@ def handle_event(request):
 
 
 def handle_slack_event(request, event):
-    if event["type"] == "message":
+    if event["type"] == "app_mention":
+        if not check_for_image(request, event):
+            request.slack.post(
+                event["channel"],
+                "Mention me when you post an image to start a caption contest",
+            )
+    elif event["type"] == "message":
         if event["channel_type"] == "im":
             handle_im(request, event)
-        elif event.get("files"):
-            check_for_image(request, event)
 
 
 def handle_im(request, event):
@@ -47,14 +51,15 @@ def handle_im(request, event):
 
 def check_for_image(request, event):
     image = None
-    for file in event["files"]:
+    for file in event.get("files", []):
         if file["filetype"] in ("png", "jpg", "jpeg"):
             image = file
             break
     if image is None:
-        return
+        return False
     channel = event["channel"]
     start_contest(request, channel, image)
+    return True
 
 
 @view_config(route_name="command", renderer="json")
